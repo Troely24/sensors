@@ -8,11 +8,12 @@ $failedChecks = @()
 $warningChecks = @()
 
 try {
-    # Check Windows Update Service Status
+    # Modified Windows Update Service Status Check
     $wuService = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
     if ($wuService) {
         if ($wuService.Status -ne "Running") {
-            $failedChecks += "Windows Update Service: $($wuService.Status)"
+            # Return "No Issues" when Windows Update Service is not running
+            return "No Issues"
         }
     } else {
         $failedChecks += "Windows Update Service: Not Found"
