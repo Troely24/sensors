@@ -1,4 +1,4 @@
-# Description: Windows Update Connectivity and Status Monitor
+# Description: Windows Update Connectivity and GPO Blocking Detection
 # Execution Context: SYSTEM
 # Execution Architecture: EITHER64OR32BIT
 # Return Type: STRING
@@ -63,27 +63,79 @@ try {
         $failedChecks += "Update Agent: $($_.Exception.Message)"
     }
 
-    # Check for Group Policy restrictions
+    # Enhanced Group Policy blocking checks
     $registryPaths = @(
         "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate",
         "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
     )
     
     $policyBlocks = @()
-    foreach ($path in $registryPaths) {
-        if (Test-Path $path) {
-            $policies = Get-ItemProperty $path -ErrorAction SilentlyContinue
-            if ($policies.NoAutoUpdate -eq 1) {
-                $policyBlocks += "NoAutoUpdate enabled"
+    
+    # Check main WindowsUpdate policy key
+    if (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate") {
+        $updatePolicies = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -ErrorAction SilentlyContinue
+        
+        # Check for DoNotConnectToWindowsUpdateInternetLocations
+        if ($updatePolicies.DoNotConnectToWindowsUpdateInternetLocations -eq 1) {
+            $policyBlocks += "Internet access blocked via DoNotConnectToWindowsUpdateInternetLocations"
+        }
+        
+        # Check for SetDisableUXWUAccess (Remove access to use all Windows Update features)
+        if ($updatePolicies.SetDisableUXWUAccess -eq 1) {
+            $policyBlocks += "Windows Update access disabled via SetDisableUXWUAccess"
+        }
+        
+        # Check for WSUS server configuration that might block updates
+        if ($updatePolicies.WUServer -and $updatePolicies.UseWUServer -eq 1) {
+            $warningChecks += "WSUS Server configured: $($updatePolicies.WUServer)"
+        }
+    }
+    
+    # Check AU (Automatic Updates) policy key
+    if (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU") {
+        $auPolicies = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -ErrorAction SilentlyContinue
+        
+        # Check for NoAutoUpdate (completely disables automatic updates)
+        if ($auPolicies.NoAutoUpdate -eq 1) {
+            $policyBlocks += "Automatic Updates disabled via NoAutoUpdate"
+        }
+        
+        # Check for AUOptions settings that might block updates
+        if ($auPolicies.AUOptions) {
+            switch ($auPolicies.AUOptions) {
+                1 { $policyBlocks += "Updates disabled via AUOptions (Keep system admin in control)" }
+                2 { $warningChecks += "Updates require notification before download (AUOptions=2)" }
+                3 { $warningChecks += "Updates auto-download but require install notification (AUOptions=3)" }
+                4 { $warningChecks += "Updates scheduled for automatic installation (AUOptions=4)" }
+                5 { $warningChecks += "Local admin controls update settings (AUOptions=5)" }
+                7 { $warningChecks += "Auto download with install/restart notifications (AUOptions=7)" }
             }
-            if ($policies.AUOptions -eq 1) {
-                $policyBlocks += "Auto Update disabled via policy"
+        }
+        
+        # Check for ScheduledInstallDay (0 = every day, 1-7 = specific days)
+        if ($auPolicies.ScheduledInstallDay -and $auPolicies.ScheduledInstallDay -ne 0) {
+            $dayNames = @("", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+            $warningChecks += "Updates scheduled only for $($dayNames[$auPolicies.ScheduledInstallDay])"
+        }
+    }
+    
+    # Check additional blocking policies
+    $additionalPolicyPaths = @(
+        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update"; Key="EnableFeaturedSoftware"; BlockValue=0; Description="Featured software downloads disabled"},
+        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update"; Key="IncludeRecommendedUpdates"; BlockValue=0; Description="Recommended updates excluded"}
+    )
+    
+    foreach ($policyCheck in $additionalPolicyPaths) {
+        if (Test-Path $policyCheck.Path) {
+            $policyValue = Get-ItemProperty $policyCheck.Path -Name $policyCheck.Key -ErrorAction SilentlyContinue
+            if ($policyValue -and $policyValue.($policyCheck.Key) -eq $policyCheck.BlockValue) {
+                $warningChecks += $policyCheck.Description
             }
         }
     }
     
     if ($policyBlocks.Count -gt 0) {
-        $failedChecks += "Group Policy: $($policyBlocks -join ', ')"
+        $failedChecks += "Group Policy Blocks: $($policyBlocks -join '; ')"
     }
 
     # Check last successful update (warning only)
