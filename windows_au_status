@@ -1,0 +1,130 @@
+# Description: Windows Update Connectivity and Status Monitor
+# Execution Context: SYSTEM
+# Execution Architecture: EITHER64OR32BIT
+# Return Type: STRING
+
+# Initialize arrays to track check results
+$failedChecks = @()
+$warningChecks = @()
+
+try {
+    # Check Windows Update Service Status
+    $wuService = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
+    if ($wuService) {
+        if ($wuService.Status -ne "Running") {
+            $failedChecks += "Windows Update Service: $($wuService.Status)"
+        }
+    } else {
+        $failedChecks += "Windows Update Service: Not Found"
+    }
+
+    # Check BITS Service
+    $bitsService = Get-Service -Name "BITS" -ErrorAction SilentlyContinue
+    if (-not $bitsService -or $bitsService.Status -ne "Running") {
+        $failedChecks += "BITS Service: $($bitsService.Status)"
+    }
+
+    # Check Cryptographic Services
+    $cryptSvc = Get-Service -Name "CryptSvc" -ErrorAction SilentlyContinue
+    if (-not $cryptSvc -or $cryptSvc.Status -ne "Running") {
+        $failedChecks += "Cryptographic Service: $($cryptSvc.Status)"
+    }
+
+    # Test Microsoft Update connectivity
+    $updateUrls = @(
+        "windowsupdate.microsoft.com",
+        "update.microsoft.com",
+        "download.windowsupdate.com"
+    )
+    
+    $connectivityIssues = @()
+    foreach ($url in $updateUrls) {
+        try {
+            $testConnection = Test-NetConnection -ComputerName $url -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue
+            if (-not $testConnection) {
+                $connectivityIssues += $url
+            }
+        } catch {
+            $connectivityIssues += $url
+        }
+    }
+    
+    if ($connectivityIssues.Count -gt 0) {
+        $failedChecks += "Network Access: Cannot reach $($connectivityIssues -join ', ')"
+    }
+
+    # Check Windows Update Agent status
+    try {
+        $updateSession = New-Object -ComObject "Microsoft.Update.Session"
+        $updateSearcher = $updateSession.CreateUpdateSearcher()
+        $searchResult = $updateSearcher.Search("IsInstalled=0 and Type='Software'")
+        # Agent is functional if we can search for updates
+    } catch {
+        $failedChecks += "Update Agent: $($_.Exception.Message)"
+    }
+
+    # Check for Group Policy restrictions
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate",
+        "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+    )
+    
+    $policyBlocks = @()
+    foreach ($path in $registryPaths) {
+        if (Test-Path $path) {
+            $policies = Get-ItemProperty $path -ErrorAction SilentlyContinue
+            if ($policies.NoAutoUpdate -eq 1) {
+                $policyBlocks += "NoAutoUpdate enabled"
+            }
+            if ($policies.AUOptions -eq 1) {
+                $policyBlocks += "Auto Update disabled via policy"
+            }
+        }
+    }
+    
+    if ($policyBlocks.Count -gt 0) {
+        $failedChecks += "Group Policy: $($policyBlocks -join ', ')"
+    }
+
+    # Check last successful update (warning only)
+    try {
+        $updateHistory = Get-WinEvent -FilterHashtable @{LogName='System'; ID=19} -MaxEvents 1 -ErrorAction SilentlyContinue
+        if ($updateHistory) {
+            $daysSinceUpdate = ((Get-Date) - $updateHistory.TimeCreated).Days
+            if ($daysSinceUpdate -gt 30) {
+                $warningChecks += "Last Update: $daysSinceUpdate days ago"
+            }
+        } else {
+            $warningChecks += "Cannot determine last update time"
+        }
+    } catch {
+        $warningChecks += "Update history check failed"
+    }
+
+    # Check connectivity time requirements (warning only)
+    try {
+        $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
+        $uptime = ((Get-Date) - $bootTime).TotalHours
+        if ($uptime -lt 8) {
+            $warningChecks += "Device only online for $([math]::Round($uptime, 1)) hours (need 8+ for reliable updates)"
+        }
+    } catch {
+        $warningChecks += "Cannot determine uptime"
+    }
+
+} catch {
+    $failedChecks += "CRITICAL ERROR: $($_.Exception.Message)"
+}
+
+# Determine output based on failed checks
+if ($failedChecks.Count -eq 0) {
+    # All critical checks passed - return Running
+    if ($warningChecks.Count -gt 0) {
+        return "Running (Warnings: $($warningChecks -join '; '))"
+    } else {
+        return "Running"
+    }
+} else {
+    # Critical issues found - return blocking information
+    return "BLOCKED: $($failedChecks -join '; ')"
+}
