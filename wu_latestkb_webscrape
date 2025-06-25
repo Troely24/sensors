@@ -1,0 +1,229 @@
+<#
+.SYNOPSIS
+    Workspace ONE Sensor - Windows 11 KB Update Detection with Latest Installed KB Info
+    
+.DESCRIPTION
+    This sensor scrapes Microsoft support pages to determine the latest KB updates
+    for Windows 11 versions, checks if the current system has the latest updates installed,
+    and reports the most recent KB installed on the device along with its release date.
+    
+.NOTES
+    Author: IT Administrator
+    Version: 2.0
+    Execution Context: System
+    Architecture: Auto
+#>
+
+try {
+    # Initialize variables
+    $OutputData = @{}
+    $CurrentOS = Get-CimInstance -ClassName Win32_OperatingSystem
+    $CurrentBuild = $CurrentOS.BuildNumber
+    $CurrentVersion = $CurrentOS.Version
+    
+    # Define Windows 11 version mappings
+    $Win11Versions = @{
+        "26100" = @{
+            "VersionName" = "24H2"
+            "SupportURL" = "https://support.microsoft.com/en-us/help/5045988"
+        }
+        "22631" = @{
+            "VersionName" = "23H2" 
+            "SupportURL" = "https://support.microsoft.com/en-us/help/5031682"
+        }
+        "22621" = @{
+            "VersionName" = "22H2"
+            "SupportURL" = "https://support.microsoft.com/en-us/help/5018680"
+        }
+        "22000" = @{
+            "VersionName" = "21H2"
+            "SupportURL" = "https://support.microsoft.com/en-us/help/5006099"
+        }
+    }
+    
+    # Check if running Windows 11
+    if ($CurrentOS.Caption -notlike "*Windows 11*") {
+        Write-Output "Not Windows 11"
+        return "Not Windows 11"
+    }
+    
+    # Determine current Windows 11 version
+    $CurrentWin11Version = $null
+    foreach ($build in $Win11Versions.Keys) {
+        if ($CurrentBuild -like "$build*") {
+            $CurrentWin11Version = $Win11Versions[$build]
+            break
+        }
+    }
+    
+    if (-not $CurrentWin11Version) {
+        Write-Output "Unknown Windows 11 version"
+        return "Unknown Windows 11 version"
+    }
+    
+    # Get installed hotfixes with dates
+    $InstalledKBs = Get-HotFix | Sort-Object InstalledOn -Descending
+    
+    # Get the most recent KB installed on the device
+    $LatestInstalledKB = $InstalledKBs | Select-Object -First 1
+    $LatestInstalledKBID = if ($LatestInstalledKB) { $LatestInstalledKB.HotFixID } else { "None" }
+    $LatestInstalledKBDate = if ($LatestInstalledKB -and $LatestInstalledKB.InstalledOn) { 
+        $LatestInstalledKB.InstalledOn.ToString("yyyy-MM-dd") 
+    } else { 
+        "Unknown" 
+    }
+    
+    # Latest KB information based on current data (June 2025)
+    $LatestKBs = @{
+        "24H2" = @{
+            "KB" = "KB5063060"
+            "Build" = "26100.4351"
+            "ReleaseDate" = "2025-06-11"
+        }
+        "23H2" = @{
+            "KB" = "KB5060999" 
+            "Build" = "22631.5472"
+            "ReleaseDate" = "2025-06-10"
+        }
+        "22H2" = @{
+            "KB" = "KB5060999"
+            "Build" = "22621.5472" 
+            "ReleaseDate" = "2025-06-10"
+        }
+        "21H2" = @{
+            "KB" = "KB5044280"
+            "Build" = "22000.3260"
+            "ReleaseDate" = "2024-10-08"
+            "Status" = "End of Service"
+        }
+    }
+    
+    # Function to get KB release date from Microsoft support pages
+    function Get-KBReleaseDate {
+        param($KBNumber)
+        
+        # Known KB release dates based on recent updates
+        $KnownKBDates = @{
+            "KB5063060" = "2025-06-11"
+            "KB5060999" = "2025-06-10"
+            "KB5060842" = "2025-06-10"
+            "KB5044280" = "2024-10-08"
+            "KB5058379" = "2025-05-14"
+            "KB5058392" = "2025-05-14"
+            "KB5058383" = "2025-05-14"
+            "KB5058387" = "2025-05-14"
+        }
+        
+        if ($KnownKBDates.ContainsKey($KBNumber)) {
+            return $KnownKBDates[$KBNumber]
+        }
+        
+        # Try to parse from Microsoft support URL
+        try {
+            $KBUrl = "https://support.microsoft.com/en-us/topic/" + $KBNumber.ToLower()
+            $WebContent = Invoke-WebRequest -Uri $KBUrl -UseBasicParsing -TimeoutSec 15 -ErrorAction SilentlyContinue
+            if ($WebContent) {
+                # Look for date patterns in the content
+                $DatePattern = '\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b'
+                $DateMatches = [regex]::Matches($WebContent.Content, $DatePattern)
+                if ($DateMatches.Count -gt 0) {
+                    $ParsedDate = [DateTime]::Parse($DateMatches[0].Value)
+                    return $ParsedDate.ToString("yyyy-MM-dd")
+                }
+            }
+        }
+        catch {
+            # Silently continue if web scraping fails
+        }
+        
+        return "Unknown"
+    }
+    
+    # Get release date for the latest installed KB
+    $LatestInstalledKBReleaseDate = if ($LatestInstalledKBID -ne "None") {
+        Get-KBReleaseDate -KBNumber $LatestInstalledKBID
+    } else {
+        "N/A"
+    }
+    
+    # Function to scrape KB information from Microsoft support pages
+    function Get-LatestKBFromWeb {
+        param($URL, $VersionName)
+        
+        try {
+            $WebContent = Invoke-WebRequest -Uri $URL -UseBasicParsing -TimeoutSec 30
+            $Content = $WebContent.Content
+            
+            # Parse for KB numbers (pattern: KB followed by 7 digits)
+            $KBPattern = 'KB\d{7}'
+            $KBMatches = [regex]::Matches($Content, $KBPattern)
+            
+            if ($KBMatches.Count -gt 0) {
+                # Get the most recent KB (usually first in the list)
+                $LatestKB = $KBMatches[0].Value
+                return $LatestKB
+            }
+        }
+        catch {
+            Write-Warning "Failed to scrape $URL : $($_.Exception.Message)"
+        }
+        
+        return $null
+    }
+    
+    # Get latest KB for current version
+    $CurrentVersionInfo = $LatestKBs[$CurrentWin11Version.VersionName]
+    $LatestKB = $CurrentVersionInfo.KB
+    $LatestBuild = $CurrentVersionInfo.Build
+    $LatestKBReleaseDate = $CurrentVersionInfo.ReleaseDate
+    
+    # Optional: Try to get live data from web (may be blocked by security policies)
+    $WebScrapedKB = Get-LatestKBFromWeb -URL $CurrentWin11Version.SupportURL -VersionName $CurrentWin11Version.VersionName
+    if ($WebScrapedKB) {
+        $LatestKB = $WebScrapedKB
+        $LatestKBReleaseDate = Get-KBReleaseDate -KBNumber $WebScrapedKB
+    }
+    
+    # Check if latest KB is installed
+    $AllInstalledKBIDs = $InstalledKBs | Select-Object -ExpandProperty HotFixID
+    $IsLatestKBInstalled = $AllInstalledKBIDs -contains $LatestKB
+    
+    # Get current system build number details
+    $SystemInfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+    $CurrentFullBuild = "$($SystemInfo.CurrentBuildNumber).$($SystemInfo.UBR)"
+    
+    # Determine compliance status
+    $ComplianceStatus = if ($IsLatestKBInstalled) { "Compliant" } else { "Non-Compliant" }
+    
+    # Special handling for end-of-service versions
+    if ($CurrentVersionInfo.Status -eq "End of Service") {
+        $ComplianceStatus = "End of Service - Upgrade Required"
+    }
+    
+    # Create output object
+    $OutputData = [PSCustomObject]@{
+        "Windows11Version" = $CurrentWin11Version.VersionName
+        "CurrentBuild" = $CurrentFullBuild
+        "LatestAvailableKB" = $LatestKB
+        "LatestAvailableBuild" = $LatestBuild
+        "LatestAvailableKBReleaseDate" = $LatestKBReleaseDate
+        "LatestInstalledKB" = $LatestInstalledKBID
+        "LatestInstalledKBDate" = $LatestInstalledKBDate
+        "LatestInstalledKBReleaseDate" = $LatestInstalledKBReleaseDate
+        "IsLatestKBInstalled" = $IsLatestKBInstalled
+        "ComplianceStatus" = $ComplianceStatus
+        "LastChecked" = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        "SupportURL" = $CurrentWin11Version.SupportURL
+    }
+    
+    # Enhanced output for Workspace ONE
+    $OutputString = "Windows 11 $($OutputData.Windows11Version)| Latest Available: $($OutputData.LatestAvailableKB) ($($OutputData.LatestAvailableKBReleaseDate)) | Latest Installed: $($OutputData.LatestInstalledKB) ($($OutputData.LatestInstalledKBReleaseDate)) | Status: $($OutputData.ComplianceStatus)"
+    
+    Write-Output $OutputString
+    return $OutputData.ComplianceStatus
+}
+catch {
+    $ErrorMessage = "Error checking Windows 11 KB status: $($_.Exception.Message)"
+    Write-Output $ErrorMessage
+    return "Error"
+}
