@@ -1,183 +1,240 @@
-# Description: Windows Update Connectivity and GPO Blocking Detection
-# Execution Context: SYSTEM
-# Execution Architecture: EITHER64OR32BIT
-# Return Type: STRING
+# Workspace ONE UEM Windows Sensor: Migration Conflict Detection
+# Detects Windows Update and GPO conflicts that may interfere with modern management
+# Returns: String value for compliance status and conflict details
+# Author: Migration Assessment Tool
+# Version: 1.1
 
-# Initialize arrays to track check results
-$failedChecks = @()
-$warningChecks = @()
+# Initialize variables
+$conflictDetails = @()
+$conflictCount = 0
+$overallStatus = "COMPLIANT"
 
+# Function to add conflict to results
+function Add-Conflict {
+    param(
+        [string]$Type,
+        [string]$Description,
+        [string]$Impact,
+        [string]$Location
+    )
+    
+    $script:conflictDetails += "$Type|$Description|$Impact|$Location"
+    $script:conflictCount++
+    
+    if ($Impact -eq "HIGH") {
+        $script:overallStatus = "NON_COMPLIANT"
+    } elseif ($Impact -eq "MEDIUM" -and $script:overallStatus -eq "COMPLIANT") {
+        $script:overallStatus = "WARNING"
+    }
+}
+
+# Check Windows Update conflicts
 try {
-    # Modified Windows Update Service Status Check
-    $wuService = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
-    if ($wuService) {
-        if ($wuService.Status -ne "Running") {
-            # Return "No Issues" when Windows Update Service is not running
-            return "No Issues"
-        }
-    } else {
-        $failedChecks += "Windows Update Service: Not Found"
-    }
-
-    # Check BITS Service
-    $bitsService = Get-Service -Name "BITS" -ErrorAction SilentlyContinue
-    if (-not $bitsService -or $bitsService.Status -ne "Running") {
-        $failedChecks += "BITS Service: $($bitsService.Status)"
-    }
-
-    # Check Cryptographic Services
-    $cryptSvc = Get-Service -Name "CryptSvc" -ErrorAction SilentlyContinue
-    if (-not $cryptSvc -or $cryptSvc.Status -ne "Running") {
-        $failedChecks += "Cryptographic Service: $($cryptSvc.Status)"
-    }
-
-    # Test Microsoft Update connectivity
-    $updateUrls = @(
-        "windowsupdate.microsoft.com",
-        "update.microsoft.com",
-        "download.windowsupdate.com"
-    )
-    
-    $connectivityIssues = @()
-    foreach ($url in $updateUrls) {
-        try {
-            $testConnection = Test-NetConnection -ComputerName $url -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue
-            if (-not $testConnection) {
-                $connectivityIssues += $url
-            }
-        } catch {
-            $connectivityIssues += $url
-        }
+    # Check WSUS configuration
+    $wsusServer = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "WUServer" -ErrorAction SilentlyContinue
+    if ($wsusServer) {
+        Add-Conflict -Type "WSUS_SERVER" -Description "WSUS server configured: $($wsusServer.WUServer)" -Impact "HIGH" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\WUServer"
     }
     
-    if ($connectivityIssues.Count -gt 0) {
-        $failedChecks += "Network Access: Cannot reach $($connectivityIssues -join ', ')"
-    }
-
-    # Check Windows Update Agent status
-    try {
-        $updateSession = New-Object -ComObject "Microsoft.Update.Session"
-        $updateSearcher = $updateSession.CreateUpdateSearcher()
-        $searchResult = $updateSearcher.Search("IsInstalled=0 and Type='Software'")
-        # Agent is functional if we can search for updates
-    } catch {
-        $failedChecks += "Update Agent: $($_.Exception.Message)"
-    }
-
-    # Enhanced Group Policy blocking checks
-    $registryPaths = @(
-        "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate",
-        "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
-    )
-    
-    $policyBlocks = @()
-    
-    # Check main WindowsUpdate policy key
-    if (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate") {
-        $updatePolicies = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -ErrorAction SilentlyContinue
-        
-        # Check for DoNotConnectToWindowsUpdateInternetLocations
-        if ($updatePolicies.DoNotConnectToWindowsUpdateInternetLocations -eq 1) {
-            $policyBlocks += "Internet access blocked via DoNotConnectToWindowsUpdateInternetLocations"
-        }
-        
-        # Check for SetDisableUXWUAccess (Remove access to use all Windows Update features)
-        if ($updatePolicies.SetDisableUXWUAccess -eq 1) {
-            $policyBlocks += "Windows Update access disabled via SetDisableUXWUAccess"
-        }
-        
-        # Check for WSUS server configuration that might block updates
-        if ($updatePolicies.WUServer -and $updatePolicies.UseWUServer -eq 1) {
-            $warningChecks += "WSUS Server configured: $($updatePolicies.WUServer)"
-        }
+    $wsusStatusServer = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "WUStatusServer" -ErrorAction SilentlyContinue
+    if ($wsusStatusServer) {
+        Add-Conflict -Type "WSUS_STATUS" -Description "WSUS status server configured: $($wsusStatusServer.WUStatusServer)" -Impact "HIGH" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\WUStatusServer"
     }
     
-    # Check AU (Automatic Updates) policy key
-    if (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU") {
-        $auPolicies = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -ErrorAction SilentlyContinue
-        
-        # Check for NoAutoUpdate (completely disables automatic updates)
-        if ($auPolicies.NoAutoUpdate -eq 1) {
-            $policyBlocks += "Automatic Updates disabled via NoAutoUpdate"
-        }
-        
-        # Check for AUOptions settings that might block updates
-        if ($auPolicies.AUOptions) {
-            switch ($auPolicies.AUOptions) {
-                1 { $policyBlocks += "Updates disabled via AUOptions (Keep system admin in control)" }
-                2 { $warningChecks += "Updates require notification before download (AUOptions=2)" }
-                3 { $warningChecks += "Updates auto-download but require install notification (AUOptions=3)" }
-                4 { $warningChecks += "Updates scheduled for automatic installation (AUOptions=4)" }
-                5 { $warningChecks += "Local admin controls update settings (AUOptions=5)" }
-                7 { $warningChecks += "Auto download with install/restart notifications (AUOptions=7)" }
-            }
-        }
-        
-        # Check for ScheduledInstallDay (0 = every day, 1-7 = specific days)
-        if ($auPolicies.ScheduledInstallDay -and $auPolicies.ScheduledInstallDay -ne 0) {
-            $dayNames = @("", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
-            $warningChecks += "Updates scheduled only for $($dayNames[$auPolicies.ScheduledInstallDay])"
-        }
+    # Check UseWUServer setting
+    $useWUServer = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "UseWUServer" -ErrorAction SilentlyContinue
+    if ($useWUServer -and $useWUServer.UseWUServer -eq 1) {
+        Add-Conflict -Type "USE_WSUS" -Description "Device configured to use WSUS server" -Impact "HIGH" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\UseWUServer"
     }
     
-    # Check additional blocking policies
-    $additionalPolicyPaths = @(
-        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update"; Key="EnableFeaturedSoftware"; BlockValue=0; Description="Featured software downloads disabled"},
-        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update"; Key="IncludeRecommendedUpdates"; BlockValue=0; Description="Recommended updates excluded"}
-    )
-    
-    foreach ($policyCheck in $additionalPolicyPaths) {
-        if (Test-Path $policyCheck.Path) {
-            $policyValue = Get-ItemProperty $policyCheck.Path -Name $policyCheck.Key -ErrorAction SilentlyContinue
-            if ($policyValue -and $policyValue.($policyCheck.Key) -eq $policyCheck.BlockValue) {
-                $warningChecks += $policyCheck.Description
-            }
-        }
+    # Check NoAutoUpdate
+    $noAutoUpdate = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -ErrorAction SilentlyContinue
+    if ($noAutoUpdate -and $noAutoUpdate.NoAutoUpdate -eq 1) {
+        Add-Conflict -Type "NO_AUTO_UPDATE" -Description "Automatic Updates disabled via policy" -Impact "HIGH" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoUpdate"
     }
     
-    if ($policyBlocks.Count -gt 0) {
-        $failedChecks += "Group Policy Blocks: $($policyBlocks -join '; ')"
+    # Check AUOptions
+    $auOptions = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "AUOptions" -ErrorAction SilentlyContinue
+    if ($auOptions) {
+        Add-Conflict -Type "AU_OPTIONS" -Description "Automatic Update options configured: $($auOptions.AUOptions)" -Impact "MEDIUM" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\AUOptions"
     }
-
-    # Check last successful update (warning only)
-    try {
-        $updateHistory = Get-WinEvent -FilterHashtable @{LogName='System'; ID=19} -MaxEvents 1 -ErrorAction SilentlyContinue
-        if ($updateHistory) {
-            $daysSinceUpdate = ((Get-Date) - $updateHistory.TimeCreated).Days
-            if ($daysSinceUpdate -gt 30) {
-                $warningChecks += "Last Update: $daysSinceUpdate days ago"
-            }
-        } else {
-            $warningChecks += "Cannot determine last update time"
-        }
-    } catch {
-        $warningChecks += "Update history check failed"
+    
+    # Check Windows Update service
+    $wuauserv = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
+    if ($wuauserv -and $wuauserv.StartType -eq "Disabled") {
+        Add-Conflict -Type "WU_SERVICE_DISABLED" -Description "Windows Update service is disabled" -Impact "HIGH" -Location "Service: wuauserv"
     }
-
-    # Check connectivity time requirements (warning only)
-    try {
-        $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
-        $uptime = ((Get-Date) - $bootTime).TotalHours
-        if ($uptime -lt 8) {
-            $warningChecks += "Device only online for $([math]::Round($uptime, 1)) hours (need 8+ for reliable updates)"
-        }
-    } catch {
-        $warningChecks += "Cannot determine uptime"
+    
+    # Check DisableWindowsUpdateAccess
+    $disableWUAccess = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DisableWindowsUpdateAccess" -ErrorAction SilentlyContinue
+    if ($disableWUAccess -and $disableWUAccess.DisableWindowsUpdateAccess -eq 1) {
+        Add-Conflict -Type "WU_ACCESS_DISABLED" -Description "Windows Update access disabled" -Impact "HIGH" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\DisableWindowsUpdateAccess"
     }
-
 } catch {
-    $failedChecks += "CRITICAL ERROR: $($_.Exception.Message)"
+    Add-Conflict -Type "WU_CHECK_ERROR" -Description "Error checking Windows Update settings: $($_.Exception.Message)" -Impact "LOW" -Location "Windows Update Registry"
 }
 
-# Determine output based on failed checks
-if ($failedChecks.Count -eq 0) {
-    # All critical checks passed - return Running
-    if ($warningChecks.Count -gt 0) {
-        return "Running (Warnings: $($warningChecks -join '; '))"
-    } else {
-        return "Running"
+# Check GPO conflicts that affect modern management
+try {
+    # Check MDM registration
+    $disableMDM = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\MDM" -Name "DisableRegistration" -ErrorAction SilentlyContinue
+    if ($disableMDM -and $disableMDM.DisableRegistration -eq 1) {
+        Add-Conflict -Type "MDM_DISABLED" -Description "MDM registration disabled via policy" -Impact "HIGH" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\MDM\DisableRegistration"
     }
-} else {
-    # Critical issues found - return blocking information
-    return "BLOCKED: $($failedChecks -join '; ')"
+    
+    # Check Windows Store policies
+    $disableStore = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "DisableStoreApps" -ErrorAction SilentlyContinue
+    if ($disableStore -and $disableStore.DisableStoreApps -eq 1) {
+        Add-Conflict -Type "STORE_DISABLED" -Description "Windows Store apps disabled" -Impact "MEDIUM" -Location "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore\DisableStoreApps"
+    }
+    
+    $privateStoreOnly = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore" -Name "RequirePrivateStoreOnly" -ErrorAction SilentlyContinue
+    if ($privateStoreOnly -and $privateStoreOnly.RequirePrivateStoreOnly -eq 1) {
+        Add-Conflict -Type "PRIVATE_STORE_ONLY" -Description "Private store only policy enabled" -Impact "MEDIUM" -Location "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore\RequirePrivateStoreOnly"
+    }
+    
+    # Check PowerShell execution policy
+    $psExecPolicy = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ExecutionPolicy" -Name "ExecutionPolicy" -ErrorAction SilentlyContinue
+    if ($psExecPolicy) {
+        Add-Conflict -Type "PS_EXEC_POLICY" -Description "PowerShell execution policy configured: $($psExecPolicy.ExecutionPolicy)" -Impact "MEDIUM" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ExecutionPolicy\ExecutionPolicy"
+    }
+    
+    # Check Windows Defender
+    $disableDefender = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "DisableAntiSpyware" -ErrorAction SilentlyContinue
+    if ($disableDefender -and $disableDefender.DisableAntiSpyware -eq 1) {
+        Add-Conflict -Type "DEFENDER_DISABLED" -Description "Windows Defender disabled via policy" -Impact "MEDIUM" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\DisableAntiSpyware"
+    }
+    
+    # Check device install restrictions
+    $denyDeviceIDs = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions" -Name "DenyDeviceIDs" -ErrorAction SilentlyContinue
+    if ($denyDeviceIDs) {
+        Add-Conflict -Type "DEVICE_INSTALL_RESTRICTED" -Description "Device installation restrictions configured" -Impact "MEDIUM" -Location "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs"
+    }
+} catch {
+    Add-Conflict -Type "GPO_CHECK_ERROR" -Description "Error checking GPO settings: $($_.Exception.Message)" -Impact "LOW" -Location "GPO Registry"
 }
+
+# Check SCCM conflicts
+try {
+    # Check for SCCM client service
+    $ccmExec = Get-Service -Name "CcmExec" -ErrorAction SilentlyContinue
+    if ($ccmExec) {
+        Add-Conflict -Type "SCCM_CLIENT" -Description "SCCM Client service found - Status: $($ccmExec.Status)" -Impact "HIGH" -Location "Service: CcmExec"
+    }
+    
+    # Check SCCM SMS Agent Host service
+    $smsAgent = Get-Service -Name "smstsmgr" -ErrorAction SilentlyContinue
+    if ($smsAgent) {
+        Add-Conflict -Type "SCCM_SMS_AGENT" -Description "SCCM SMS Agent service found - Status: $($smsAgent.Status)" -Impact "MEDIUM" -Location "Service: smstsmgr"
+    }
+    
+    # Check SCCM registry
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\SMS") {
+        $smsPath = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Mobile Client" -Name "ProductVersion" -ErrorAction SilentlyContinue
+        if ($smsPath) {
+            Add-Conflict -Type "SCCM_REGISTRY" -Description "SCCM client registry keys found - Version: $($smsPath.ProductVersion)" -Impact "MEDIUM" -Location "HKLM:\SOFTWARE\Microsoft\SMS"
+        }
+    }
+    
+    # Check CCM registry
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\CCM") {
+        Add-Conflict -Type "CCM_REGISTRY" -Description "CCM registry keys found" -Impact "LOW" -Location "HKLM:\SOFTWARE\Microsoft\CCM"
+    }
+} catch {
+    Add-Conflict -Type "SCCM_CHECK_ERROR" -Description "Error checking SCCM settings: $($_.Exception.Message)" -Impact "LOW" -Location "SCCM Components"
+}
+
+# Check critical services
+try {
+    $criticalServices = @("BITS", "Winmgmt", "RpcSs", "EventLog")
+    foreach ($serviceName in $criticalServices) {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service) {
+            if ($service.Status -ne "Running" -or $service.StartType -eq "Disabled") {
+                Add-Conflict -Type "CRITICAL_SERVICE" -Description "$serviceName service issue - Status: $($service.Status), StartType: $($service.StartType)" -Impact "MEDIUM" -Location "Service: $serviceName"
+            }
+        }
+    }
+} catch {
+    Add-Conflict -Type "SERVICE_CHECK_ERROR" -Description "Error checking critical services: $($_.Exception.Message)" -Impact "LOW" -Location "Windows Services"
+}
+
+# Prepare output in readable format
+if ($conflictCount -eq 0) {
+    $outputString = "No Conflicts Detected"
+} else {
+    # Create readable output with conflict summary
+    if ($overallStatus -eq "NON_COMPLIANT") {
+        $statusText = "Possible Issues"
+    } else {
+        $statusText = $overallStatus
+    }
+    $outputString = "Ready for Workspace ONE Management Status: $statusText | Total Possible Conflicts: $conflictCount`n`n"
+    
+    # Group conflicts by type for better readability
+    $windowsUpdateConflicts = $conflictDetails | Where-Object { $_ -like "*WSUS*" -or $_ -like "*WU_*" -or $_ -like "*NO_AUTO_UPDATE*" -or $_ -like "*AU_OPTIONS*" }
+    $gpoConflicts = $conflictDetails | Where-Object { $_ -like "*MDM*" -or $_ -like "*STORE*" -or $_ -like "*PS_EXEC*" -or $_ -like "*DEFENDER*" -or $_ -like "*DEVICE_INSTALL*" }
+    $sccmConflicts = $conflictDetails | Where-Object { $_ -like "*SCCM*" -or $_ -like "*CCM*" }
+    $serviceConflicts = $conflictDetails | Where-Object { $_ -like "*SERVICE*" }
+    
+    # Windows Update Conflicts Section
+    if ($windowsUpdateConflicts.Count -gt 0) {
+        $outputString += "WINDOWS UPDATE CONFLICTS ($($windowsUpdateConflicts.Count)):`n"
+        foreach ($conflict in $windowsUpdateConflicts) {
+            $parts = $conflict -split '\|'
+            $impact = $parts[2]
+            $description = $parts[1]
+            
+            $outputString += "  [$impact] $description`n"
+        }
+        $outputString += "`n"
+    }
+    
+    # GPO Conflicts Section
+    if ($gpoConflicts.Count -gt 0) {
+        $outputString += "GROUP POLICY CONFLICTS ($($gpoConflicts.Count)):`n"
+        foreach ($conflict in $gpoConflicts) {
+            $parts = $conflict -split '\|'
+            $impact = $parts[2]
+            $description = $parts[1]
+            
+            $outputString += "  [$impact] $description`n"
+        }
+        $outputString += "`n"
+    }
+    
+    # SCCM Conflicts Section
+    if ($sccmConflicts.Count -gt 0) {
+        $outputString += "SCCM CONFLICTS ($($sccmConflicts.Count)):`n"
+        foreach ($conflict in $sccmConflicts) {
+            $parts = $conflict -split '\|'
+            $impact = $parts[2]
+            $description = $parts[1]
+            
+            $outputString += "  [$impact] $description`n"
+        }
+        $outputString += "`n"
+    }
+    
+    # Service Conflicts Section
+    if ($serviceConflicts.Count -gt 0) {
+        $outputString += "SERVICE CONFLICTS ($($serviceConflicts.Count)):`n"
+        foreach ($conflict in $serviceConflicts) {
+            $parts = $conflict -split '\|'
+            $impact = $parts[2]
+            $description = $parts[1]
+            
+            $outputString += "  [$impact] $description`n"
+        }
+        $outputString += "`n"
+    }
+    
+    # Add priority summary
+    $highImpactCount = ($conflictDetails | Where-Object { $_ -like "*|HIGH|*" }).Count
+    if ($highImpactCount -gt 0) {
+        $outputString += "PRIORITY ACTION REQUIRED: $highImpactCount HIGH impact conflicts detected"
+    }
+}
+
+# Return the formatted result
+return $outputString
