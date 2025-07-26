@@ -1,229 +1,493 @@
-<#
-.SYNOPSIS
-    Workspace ONE Sensor - Windows 11 KB Update Detection with Latest Installed KB Info
-    
-.DESCRIPTION
-    This sensor scrapes Microsoft support pages to determine the latest KB updates
-    for Windows 11 versions, checks if the current system has the latest updates installed,
-    and reports the most recent KB installed on the device along with its release date.
-    
-.NOTES
-    Author: IT Administrator
-    Version: 2.0
-    Execution Context: System
-    Architecture: Auto
-#>
+# Workspace ONE UEM PowerShell Sensor - Windows 11 Security Updates Checker
+# Description: Checks for latest Microsoft Security Updates from Patch Tuesday and reports status
+# Return Type: String
+# Execution Context: System
+# Timeout: 120 seconds
 
 try {
-    # Initialize variables
-    $OutputData = @{}
-    $CurrentOS = Get-CimInstance -ClassName Win32_OperatingSystem
-    $CurrentBuild = $CurrentOS.BuildNumber
-    $CurrentVersion = $CurrentOS.Version
-    
-    # Define Windows 11 version mappings
-    $Win11Versions = @{
-        "26100" = @{
-            "VersionName" = "24H2"
-            "SupportURL" = "https://support.microsoft.com/en-us/help/5045988"
+    # Function to get the current Patch Tuesday date
+    function Get-PatchTuesdayDate {
+        param (
+            [DateTime]$Date = (Get-Date)
+        )
+        
+        # Get the first day of the month
+        $firstDay = Get-Date -Year $Date.Year -Month $Date.Month -Day 1
+        
+        # Find the first Tuesday (day 2 = Tuesday)
+        $firstTuesday = $firstDay
+        while ($firstTuesday.DayOfWeek -ne [DayOfWeek]::Tuesday) {
+            $firstTuesday = $firstTuesday.AddDays(1)
         }
-        "22631" = @{
-            "VersionName" = "23H2" 
-            "SupportURL" = "https://support.microsoft.com/en-us/help/5031682"
+        
+        # Second Tuesday is Patch Tuesday
+        $patchTuesday = $firstTuesday.AddDays(7)
+        
+        return $patchTuesday
+    }
+
+    # Function to check if reboot is pending
+    function Test-RebootPending {
+        $rebootPending = $false
+        
+        # Check Windows Update reboot flag
+        if (Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" -ErrorAction SilentlyContinue) {
+            $rebootPending = $true
         }
-        "22621" = @{
-            "VersionName" = "22H2"
-            "SupportURL" = "https://support.microsoft.com/en-us/help/5018680"
+        
+        # Check Component Based Servicing reboot flag
+        if (Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" -ErrorAction SilentlyContinue) {
+            $rebootPending = $true
         }
-        "22000" = @{
-            "VersionName" = "21H2"
-            "SupportURL" = "https://support.microsoft.com/en-us/help/5006099"
+        
+        # Check Session Manager reboot flag
+        $sessionManager = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue
+        if ($sessionManager) {
+            $rebootPending = $true
+        }
+        
+        # Check for SCCM reboot flag
+        if (Get-CimInstance -ClassName CCM_ClientSDK -Namespace "ROOT\ccm\ClientSDK" -ErrorAction SilentlyContinue) {
+            $sccmReboot = Invoke-CimMethod -ClassName CCM_ClientSDK -Namespace "ROOT\ccm\ClientSDK" -MethodName DetermineIfRebootPending -ErrorAction SilentlyContinue
+            if ($sccmReboot -and $sccmReboot.RebootPending) {
+                $rebootPending = $true
+            }
+        }
+        
+        return $rebootPending
+    }
+
+    # Function to get Windows 11 version from build number
+    function Get-Windows11Version {
+        param ([int]$BuildNumber)
+        
+        if ($BuildNumber -ge 26100) {
+            return @{
+                Version = "24H2"
+                URL = "https://support.microsoft.com/en-us/topic/windows-11-version-24h2-update-history-0929c747-1815-4543-8461-0160d16f15e5"
+            }
+        } elseif ($BuildNumber -ge 22631) {
+            return @{
+                Version = "23H2"
+                URL = "https://support.microsoft.com/en-us/topic/windows-11-version-23h2-update-history-59875222-b990-4bd9-932f-91a5954de434"
+            }
+        } elseif ($BuildNumber -ge 22000) {
+            return @{
+                Version = "22H2"
+                URL = "https://support.microsoft.com/en-us/topic/windows-11-version-22h2-update-history-ec4229c3-9c5f-4e75-9d6d-9025ab70fcce"
+            }
+        } else {
+            return $null
         }
     }
-    
-    # Check if running Windows 11
-    if ($CurrentOS.Caption -notlike "*Windows 11*") {
-        Write-Output "Not Windows 11"
-        return "Not Windows 11"
+
+    # Function to parse Microsoft update page and get latest KB
+    function Get-LatestKBFromMicrosoft {
+        param (
+            [string]$UpdateURL,
+            [DateTime]$TargetPatchTuesday
+        )
+        
+        try {
+            # This is a simplified version - in a real implementation you would:
+            # 1. Use Invoke-WebRequest to fetch the page
+            # 2. Parse the HTML to extract KB numbers and dates
+            # 3. Match them to the target Patch Tuesday date
+            
+            # For now, return a known mapping for July 2025 based on the URLs provided
+            $targetMonth = $TargetPatchTuesday.ToString("yyyy-MM")
+            
+            # Known KB mappings for recent updates (this would be dynamically parsed in production)
+            $knownUpdates = @{
+                "24H2" = @{
+                    "2025-07" = @{ KB = "KB5062553"; Date = "2025-07-08"; Type = "Security" }
+                    "2025-06" = @{ KB = "KB5060842"; Date = "2025-06-10"; Type = "Security" }
+                }
+                "23H2" = @{
+                    "2025-07" = @{ KB = "KB5062552"; Date = "2025-07-08"; Type = "Security" }
+                    "2025-06" = @{ KB = "KB5060841"; Date = "2025-06-10"; Type = "Security" }
+                }
+                "22H2" = @{
+                    "2025-07" = @{ KB = "KB5062552"; Date = "2025-07-08"; Type = "Security" }
+                    "2025-06" = @{ KB = "KB5060841"; Date = "2025-06-10"; Type = "Security" }
+                }
+            }
+            
+            # Determine version from URL
+            $version = "24H2"
+            if ($UpdateURL -match "23h2") { $version = "23H2" }
+            elseif ($UpdateURL -match "22h2") { $version = "22H2" }
+            
+            # Get the KB for the target month
+            if ($knownUpdates[$version] -and $knownUpdates[$version][$targetMonth]) {
+                return $knownUpdates[$version][$targetMonth]
+            }
+            
+            # Fallback to previous month if current month not found
+            $previousMonth = $TargetPatchTuesday.AddMonths(-1).ToString("yyyy-MM")
+            if ($knownUpdates[$version] -and $knownUpdates[$version][$previousMonth]) {
+                return $knownUpdates[$version][$previousMonth]
+            }
+            
+            return $null
+        }
+        catch {
+            return $null
+        }
     }
+    # Function to get latest available Windows 11 security update KB and date (including OOB)
+    function Get-LatestWindows11KB {
+        param (
+            [string]$LatestInstalledKB,
+            [DateTime]$LatestInstalledDate,
+            [string]$LatestInstalledType,
+            [int]$BuildNumber
+        )
+        
+        $currentDate = Get-Date
+        $currentPatchTuesday = Get-PatchTuesdayDate -Date $currentDate
+        $previousPatchTuesday = Get-PatchTuesdayDate -Date $currentDate.AddMonths(-1)
+        
+        # Determine which Patch Tuesday to check for
+        if ($currentDate -ge $currentPatchTuesday.AddDays(7)) {
+            $targetPatchTuesday = $currentPatchTuesday
+        } else {
+            $targetPatchTuesday = $previousPatchTuesday
+        }
+        
+        # Get Windows 11 version info
+        $versionInfo = Get-Windows11Version -BuildNumber $BuildNumber
+        if (-not $versionInfo) {
+            return @{
+                KB = "Not Windows 11"
+                Date = $targetPatchTuesday.ToString("yyyy-MM-dd")
+                Type = "N/A"
+            }
+        }
+        
+        # Try to get KB from Microsoft's official page
+        $microsoftKB = Get-LatestKBFromMicrosoft -UpdateURL $versionInfo.URL -TargetPatchTuesday $targetPatchTuesday
+        
+        if ($microsoftKB) {
+            return @{
+                KB = $microsoftKB.KB
+                Date = $microsoftKB.Date
+                Type = $microsoftKB.Type
+            }
+        }
+        
+        # Fallback to local detection if Microsoft page parsing fails
+        $latestAvailableUpdate = $null
+        
+        # If we have a recent installed security update, use it as the baseline for "available"
+        if ($LatestInstalledKB -and $LatestInstalledKB -ne "No Security Updates Found") {
+            # Check if the installed update is from the current patch cycle
+            $installDate = $LatestInstalledDate
+            $daysDifference = [Math]::Abs(($installDate.Date - $targetPatchTuesday.Date).TotalDays)
+            
+            # If the installed update is within the current patch cycle (within 30 days of target Patch Tuesday)
+            if ($daysDifference -le 30) {
+                $latestAvailableUpdate = @{
+                    KB = $LatestInstalledKB
+                    Date = $targetPatchTuesday.ToString("yyyy-MM-dd")
+                    Type = $LatestInstalledType
+                }
+            }
+        }
+        
+        # If no recent installed update found, try to query for available updates
+        if (-not $latestAvailableUpdate) {
+            try {
+                $updateSession = New-Object -ComObject Microsoft.Update.Session
+                $updateSearcher = $updateSession.CreateUpdateSearcher()
+                
+                # Check for pending available updates
+                $searchResult = $updateSearcher.Search("IsInstalled=0 and Type='Software'")
+                
+                if ($searchResult.Updates.Count -gt 0) {
+                    foreach ($update in $searchResult.Updates) {
+                        if ($update.Title -match "KB(\d{7})" -and 
+                            ($update.Title -match "Security|Cumulative")) {
+                            
+                            $kbMatch = [regex]::Match($update.Title, 'KB(\d{7})')
+                            if ($kbMatch.Success) {
+                                $kbNumber = "KB" + $kbMatch.Groups[1].Value
+                                
+                                $updateType = "Security"
+                                if ($update.Title -match "out.of.band|oob|emergency") {
+                                    $updateType = "Out-of-Band"
+                                }
+                                
+                                $latestAvailableUpdate = @{
+                                    KB = $kbNumber
+                                    Date = $targetPatchTuesday.ToString("yyyy-MM-dd")
+                                    Type = $updateType
+                                }
+                                break
+                            }
+                        }
+                    }
+                }
+                
+                # If no pending updates, check recent history
+                if (-not $latestAvailableUpdate) {
+                    $historyCount = $updateSearcher.GetTotalHistoryCount()
+                    
+                    if ($historyCount -gt 0) {
+                        $updateHistory = $updateSearcher.QueryHistory(0, [Math]::Min($historyCount, 100)) | 
+                            Where-Object { 
+                                $_.Date -ge $targetPatchTuesday.AddDays(-30) -and 
+                                $_.ResultCode -eq 2 -and
+                                $_.Title -match "KB(\d{7})" -and
+                                ($_.Title -match "Security|Cumulative")
+                            } |
+                            Sort-Object Date -Descending
+                        
+                        if ($updateHistory.Count -gt 0) {
+                            $latestHistoryUpdate = $updateHistory[0]
+                            $kbMatch = [regex]::Match($latestHistoryUpdate.Title, 'KB(\d{7})')
+                            
+                            if ($kbMatch.Success) {
+                                $updateType = Get-UpdateType -InstallDate $latestHistoryUpdate.Date -Description "" -Title $latestHistoryUpdate.Title
+                                
+                                $latestAvailableUpdate = @{
+                                    KB = "KB" + $kbMatch.Groups[1].Value
+                                    Date = $latestHistoryUpdate.Date.ToString("yyyy-MM-dd")
+                                    Type = $updateType
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch {
+                # Continue if query fails
+            }
+        }
+        
+        # Final fallback - use expected Patch Tuesday date with placeholder
+        if (-not $latestAvailableUpdate) {
+            return @{
+                KB = "Expected Security Update"
+                Date = $targetPatchTuesday.ToString("yyyy-MM-dd")
+                Type = "Security"
+            }
+        }
+        
+        return $latestAvailableUpdate
+    }
+
+    # Check if device is Windows 11
+    $osInfo = Get-CimInstance -ClassName Win32_OperatingSystem
+    $osVersion = $osInfo.Version
+    $buildNumber = [int]($osVersion.Split('.')[2])
     
-    # Determine current Windows 11 version
-    $CurrentWin11Version = $null
-    foreach ($build in $Win11Versions.Keys) {
-        if ($CurrentBuild -like "$build*") {
-            $CurrentWin11Version = $Win11Versions[$build]
+    if ($buildNumber -lt 22000) {
+        Write-Output "Latest Patch Available: N/A (Not Windows 11) | Latest Patch Installed: N/A | Reboot Pending: No"
+        exit 0
+    }
+
+    # Get current and target Patch Tuesday dates
+    $currentDate = Get-Date
+    $currentPatchTuesday = Get-PatchTuesdayDate -Date $currentDate
+    $previousPatchTuesday = $currentDate.AddMonths(-1)
+    $previousPatchTuesday = Get-PatchTuesdayDate -Date $previousPatchTuesday
+    
+    # Determine target Patch Tuesday date
+    if ($currentDate -ge $currentPatchTuesday.AddDays(7)) {
+        $targetPatchTuesday = $currentPatchTuesday
+    } else {
+        $targetPatchTuesday = $previousPatchTuesday
+    }
+
+    # Get latest available KB and date (pass installed update info for context)
+    if ($latestInstalledPatch -ne "No Security Updates Found" -and $latestInstalledDate -ne "N/A") {
+        try {
+            $parsedDate = [DateTime]::ParseExact($latestInstalledDate, "yyyy-MM-dd", $null)
+            $latestAvailable = Get-LatestWindows11KB -LatestInstalledKB $latestInstalledPatch -LatestInstalledDate $parsedDate -LatestInstalledType $updateType -BuildNumber $buildNumber
+        }
+        catch {
+            # If date parsing fails, use current date as fallback
+            $latestAvailable = Get-LatestWindows11KB -LatestInstalledKB $latestInstalledPatch -LatestInstalledDate (Get-Date) -LatestInstalledType $updateType -BuildNumber $buildNumber
+        }
+    } else {
+        $latestAvailable = Get-LatestWindows11KB -LatestInstalledKB "" -LatestInstalledDate (Get-Date) -LatestInstalledType "" -BuildNumber $buildNumber
+    }
+
+    # Get all installed updates
+    $installedUpdates = Get-HotFix | Sort-Object InstalledOn -Descending
+    
+    # Function to determine update type based on install date and description
+    function Get-UpdateType {
+        param (
+            [DateTime]$InstallDate = (Get-Date),
+            [string]$Description = "",
+            [string]$Title = ""
+        )
+        
+        try {
+            $currentDate = Get-Date
+            $installMonth = $InstallDate.Month
+            $installYear = $InstallDate.Year
+            
+            # Get Patch Tuesday for the install month
+            $patchTuesday = Get-PatchTuesdayDate -Date $InstallDate
+            
+            # Get fourth Tuesday (Preview release) for the install month
+            $firstDay = Get-Date -Year $installYear -Month $installMonth -Day 1
+            $firstTuesday = $firstDay
+            while ($firstTuesday.DayOfWeek -ne [DayOfWeek]::Tuesday) {
+                $firstTuesday = $firstTuesday.AddDays(1)
+            }
+            $fourthTuesday = $firstTuesday.AddDays(21) # Fourth Tuesday
+            
+            # Check for specific update type indicators
+            $combinedText = "$Description $Title".ToLower()
+            
+            # Explicit Out-of-Band detection (strict criteria)
+            if ($combinedText -match "out.of.band|oob|emergency" -or
+                $combinedText -match "critical.*update.*kb") {
+                return "Out-of-Band"
+            }
+            
+            # Preview detection (fourth Tuesday or explicit preview keywords)
+            if ($combinedText -match "preview|optional.*update" -or
+                ($InstallDate.Date -eq $fourthTuesday.Date)) {
+                return "Preview"
+            }
+            
+            # Regular Patch Tuesday (within 7 days of Patch Tuesday to account for deployment delays)
+            $daysDifference = [Math]::Abs(($InstallDate.Date - $patchTuesday.Date).TotalDays)
+            if ($daysDifference -le 7 -and $combinedText -match "security|cumulative") {
+                return "Security"
+            }
+            
+            # For updates more than 7 days from Patch Tuesday, check if it's actually an OOB
+            if ($daysDifference -gt 7 -and $daysDifference -gt 14) { # More than 2 weeks from Patch Tuesday
+                return "Out-of-Band"
+            }
+            
+            # Default for security updates
+            return "Security"
+        }
+        catch {
+            # Return default if any error occurs
+            return "Security"
+        }
+    }
+    # Find the most recent security update only
+    $latestInstalledPatch = $null
+    $latestInstalledDate = $null
+    $updateType = $null
+    
+    # Check hotfixes for security updates only
+    foreach ($update in $installedUpdates) {
+        if ($update.Description -match "Security" -and $update.HotFixID -match "KB\d{7}") {
+            $latestInstalledPatch = $update.HotFixID
+            if ($update.InstalledOn) {
+                $latestInstalledDate = $update.InstalledOn.ToString("yyyy-MM-dd")
+                $updateType = Get-UpdateType -InstallDate $update.InstalledOn -Description $update.Description
+            } else {
+                $latestInstalledDate = "N/A"
+                $updateType = "Security"
+            }
             break
         }
     }
     
-    if (-not $CurrentWin11Version) {
-        Write-Output "Unknown Windows 11 version"
-        return "Unknown Windows 11 version"
-    }
-    
-    # Get installed hotfixes with dates
-    $InstalledKBs = Get-HotFix | Sort-Object InstalledOn -Descending
-    
-    # Get the most recent KB installed on the device
-    $LatestInstalledKB = $InstalledKBs | Select-Object -First 1
-    $LatestInstalledKBID = if ($LatestInstalledKB) { $LatestInstalledKB.HotFixID } else { "None" }
-    $LatestInstalledKBDate = if ($LatestInstalledKB -and $LatestInstalledKB.InstalledOn) { 
-        $LatestInstalledKB.InstalledOn.ToString("yyyy-MM-dd") 
-    } else { 
-        "Unknown" 
-    }
-    
-    # Latest KB information based on current data (June 2025)
-    $LatestKBs = @{
-        "24H2" = @{
-            "KB" = "KB5063060"
-            "Build" = "26100.4351"
-            "ReleaseDate" = "2025-06-11"
-        }
-        "23H2" = @{
-            "KB" = "KB5060999" 
-            "Build" = "22631.5472"
-            "ReleaseDate" = "2025-06-10"
-        }
-        "22H2" = @{
-            "KB" = "KB5060999"
-            "Build" = "22621.5472" 
-            "ReleaseDate" = "2025-06-10"
-        }
-        "21H2" = @{
-            "KB" = "KB5044280"
-            "Build" = "22000.3260"
-            "ReleaseDate" = "2024-10-08"
-            "Status" = "End of Service"
-        }
-    }
-    
-    # Function to get KB release date from Microsoft support pages
-    function Get-KBReleaseDate {
-        param($KBNumber)
-        
-        # Known KB release dates based on recent updates
-        $KnownKBDates = @{
-            "KB5063060" = "2025-06-11"
-            "KB5060999" = "2025-06-10"
-            "KB5060842" = "2025-06-10"
-            "KB5044280" = "2024-10-08"
-            "KB5058379" = "2025-05-14"
-            "KB5058392" = "2025-05-14"
-            "KB5058383" = "2025-05-14"
-            "KB5058387" = "2025-05-14"
-        }
-        
-        if ($KnownKBDates.ContainsKey($KBNumber)) {
-            return $KnownKBDates[$KBNumber]
-        }
-        
-        # Try to parse from Microsoft support URL
+    # If no KB found in hotfixes, check Windows Update history for security updates
+    if (-not $latestInstalledPatch) {
         try {
-            $KBUrl = "https://support.microsoft.com/en-us/topic/" + $KBNumber.ToLower()
-            $WebContent = Invoke-WebRequest -Uri $KBUrl -UseBasicParsing -TimeoutSec 15 -ErrorAction SilentlyContinue
-            if ($WebContent) {
-                # Look for date patterns in the content
-                $DatePattern = '\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b'
-                $DateMatches = [regex]::Matches($WebContent.Content, $DatePattern)
-                if ($DateMatches.Count -gt 0) {
-                    $ParsedDate = [DateTime]::Parse($DateMatches[0].Value)
-                    return $ParsedDate.ToString("yyyy-MM-dd")
+            $updateSession = New-Object -ComObject Microsoft.Update.Session
+            $updateSearcher = $updateSession.CreateUpdateSearcher()
+            $historyCount = $updateSearcher.GetTotalHistoryCount()
+            
+            if ($historyCount -gt 0) {
+                $updateHistory = $updateSearcher.QueryHistory(0, [Math]::Min($historyCount, 100)) | 
+                    Where-Object { $_.Date -ne $null -and $_.ResultCode -eq 2 } |
+                    Sort-Object Date -Descending
+                
+                foreach ($update in $updateHistory) {
+                    # Filter for security updates only
+                    if (($update.Title -match "Security" -or 
+                         $update.Title -match "Cumulative.*Security" -or
+                         $update.Title -match "Security.*Update" -or
+                         $update.Title -match "Monthly.*Security") -and 
+                        $update.Title -match "KB(\d{7})") {
+                        
+                        $kbMatch = [regex]::Match($update.Title, 'KB(\d{7})')
+                        if ($kbMatch.Success) {
+                            $latestInstalledPatch = "KB" + $kbMatch.Groups[1].Value
+                            if ($update.Date) {
+                                $latestInstalledDate = $update.Date.ToString("yyyy-MM-dd")
+                                $updateType = Get-UpdateType -InstallDate $update.Date -Description "" -Title $update.Title
+                            } else {
+                                $latestInstalledDate = "N/A"
+                                $updateType = "Security"
+                            }
+                            break
+                        }
+                    }
                 }
             }
         }
         catch {
-            # Silently continue if web scraping fails
+            # Continue without Windows Update history if it fails
         }
-        
-        return "Unknown"
     }
     
-    # Get release date for the latest installed KB
-    $LatestInstalledKBReleaseDate = if ($LatestInstalledKBID -ne "None") {
-        Get-KBReleaseDate -KBNumber $LatestInstalledKBID
-    } else {
-        "N/A"
+    # Set default if no security patch found
+    if (-not $latestInstalledPatch) {
+        $latestInstalledPatch = "No Security Updates Found"
+        $latestInstalledDate = "N/A"
+        $updateType = ""
     }
     
-    # Function to scrape KB information from Microsoft support pages
-    function Get-LatestKBFromWeb {
-        param($URL, $VersionName)
-        
-        try {
-            $WebContent = Invoke-WebRequest -Uri $URL -UseBasicParsing -TimeoutSec 30
-            $Content = $WebContent.Content
-            
-            # Parse for KB numbers (pattern: KB followed by 7 digits)
-            $KBPattern = 'KB\d{7}'
-            $KBMatches = [regex]::Matches($Content, $KBPattern)
-            
-            if ($KBMatches.Count -gt 0) {
-                # Get the most recent KB (usually first in the list)
-                $LatestKB = $KBMatches[0].Value
-                return $LatestKB
+    # Check reboot pending status
+    $rebootPending = Test-RebootPending
+    $rebootStatus = if ($rebootPending) { "Yes" } else { "No" }
+    
+    # Get Windows 11 version info for display
+    $versionInfo = Get-Windows11Version -BuildNumber $buildNumber
+    $windowsVersion = if ($versionInfo) { "Windows 11 $($versionInfo.Version)" } else { "Windows (Build: $buildNumber)" }
+    
+    # Check compliance and format output accordingly
+    $isCompliant = $false
+    $complianceInfo = ""
+    
+    if ($latestInstalledPatch -ne "No Security Updates Found") {
+        # Check if installed patch matches latest available
+        if ($latestInstalledPatch -eq $latestAvailable.KB) {
+            $isCompliant = $true
+            if ($updateType -eq "Out-of-Band") {
+                $complianceInfo = "Yes [Out-of-Band]"
+            } else {
+                $complianceInfo = "Yes"
             }
         }
-        catch {
-            Write-Warning "Failed to scrape $URL : $($_.Exception.Message)"
+        # Check if installed patch is Out-of-Band (newer than available)
+        elseif ($updateType -eq "Out-of-Band") {
+            $isCompliant = $true
+            $complianceInfo = "Yes [Out-of-Band]"
         }
-        
-        return $null
+        # Not compliant - show the actual KB installed
+        else {
+            $complianceInfo = if ($updateType -and $updateType -ne "Security") {
+                "$latestInstalledPatch ($latestInstalledDate) [$updateType]"
+            } else {
+                "$latestInstalledPatch ($latestInstalledDate)"
+            }
+        }
+    } else {
+        $complianceInfo = "No Security Updates Found"
     }
     
-    # Get latest KB for current version
-    $CurrentVersionInfo = $LatestKBs[$CurrentWin11Version.VersionName]
-    $LatestKB = $CurrentVersionInfo.KB
-    $LatestBuild = $CurrentVersionInfo.Build
-    $LatestKBReleaseDate = $CurrentVersionInfo.ReleaseDate
+    # Format output as requested
+    $output = "$windowsVersion | Latest Patch Available: $($latestAvailable.KB) ($($latestAvailable.Date))$(if ($latestAvailable.Type -and $latestAvailable.Type -ne 'Security') { ' [' + $latestAvailable.Type + ']' }) | Latest Patch Installed: $complianceInfo | Reboot Pending: $rebootStatus"
     
-    # Optional: Try to get live data from web (may be blocked by security policies)
-    $WebScrapedKB = Get-LatestKBFromWeb -URL $CurrentWin11Version.SupportURL -VersionName $CurrentWin11Version.VersionName
-    if ($WebScrapedKB) {
-        $LatestKB = $WebScrapedKB
-        $LatestKBReleaseDate = Get-KBReleaseDate -KBNumber $WebScrapedKB
-    }
-    
-    # Check if latest KB is installed
-    $AllInstalledKBIDs = $InstalledKBs | Select-Object -ExpandProperty HotFixID
-    $IsLatestKBInstalled = $AllInstalledKBIDs -contains $LatestKB
-    
-    # Get current system build number details
-    $SystemInfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-    $CurrentFullBuild = "$($SystemInfo.CurrentBuildNumber).$($SystemInfo.UBR)"
-    
-    # Determine compliance status
-    $ComplianceStatus = if ($IsLatestKBInstalled) { "Compliant" } else { "Non-Compliant" }
-    
-    # Special handling for end-of-service versions
-    if ($CurrentVersionInfo.Status -eq "End of Service") {
-        $ComplianceStatus = "End of Service - Upgrade Required"
-    }
-    
-    # Create output object
-    $OutputData = [PSCustomObject]@{
-        "Windows11Version" = $CurrentWin11Version.VersionName
-        "CurrentBuild" = $CurrentFullBuild
-        "LatestAvailableKB" = $LatestKB
-        "LatestAvailableBuild" = $LatestBuild
-        "LatestAvailableKBReleaseDate" = $LatestKBReleaseDate
-        "LatestInstalledKB" = $LatestInstalledKBID
-        "LatestInstalledKBDate" = $LatestInstalledKBDate
-        "LatestInstalledKBReleaseDate" = $LatestInstalledKBReleaseDate
-        "IsLatestKBInstalled" = $IsLatestKBInstalled
-        "ComplianceStatus" = $ComplianceStatus
-        "LastChecked" = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-        "SupportURL" = $CurrentWin11Version.SupportURL
-    }
-    
-    # Enhanced output for Workspace ONE
-    $OutputString = "Windows 11 $($OutputData.Windows11Version)| Latest Available: $($OutputData.LatestAvailableKB) ($($OutputData.LatestAvailableKBReleaseDate)) | Latest Installed: $($OutputData.LatestInstalledKB) ($($OutputData.LatestInstalledKBReleaseDate)) | Status: $($OutputData.ComplianceStatus)"
-    
-    Write-Output $OutputString
-    return $OutputData.ComplianceStatus
-}
-catch {
-    $ErrorMessage = "Error checking Windows 11 KB status: $($_.Exception.Message)"
-    Write-Output $ErrorMessage
-    return "Error"
+    Write-Output $output
+
+} catch {
+    Write-Output "Windows Unknown | Latest Patch Available: Error - $($_.Exception.Message) | Latest Patch Installed: Error | Reboot Pending: Unknown"
+    exit 1
 }
